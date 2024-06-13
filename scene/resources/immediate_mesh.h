@@ -44,18 +44,30 @@ class ImmediateMesh : public Mesh {
 	bool uses_tangents = false;
 	bool uses_uvs = false;
 	bool uses_uv2s = false;
+	bool uses_custom0s = false;
+	bool uses_custom1s = false;
+	bool uses_custom2s = false;
+	bool uses_custom3s = false;
 
 	Color current_color;
 	Vector3 current_normal;
 	Plane current_tangent;
 	Vector2 current_uv;
 	Vector2 current_uv2;
+	Color current_custom0;
+	Color current_custom1;
+	Color current_custom2;
+	Color current_custom3;
 
 	LocalVector<Color> colors;
 	LocalVector<Vector3> normals;
 	LocalVector<Plane> tangents;
 	LocalVector<Vector2> uvs;
 	LocalVector<Vector2> uv2s;
+	LocalVector<Color> custom0s;
+	LocalVector<Color> custom1s;
+	LocalVector<Color> custom2s;
+	LocalVector<Color> custom3s;
 	LocalVector<Vector3> vertices;
 
 	struct Surface {
@@ -87,6 +99,10 @@ public:
 	void surface_set_tangent(const Plane &p_tangent);
 	void surface_set_uv(const Vector2 &p_uv);
 	void surface_set_uv2(const Vector2 &p_uv2);
+	void surface_set_custom0(const Color &p_custom0);
+	void surface_set_custom1(const Color &p_custom1);
+	void surface_set_custom2(const Color &p_custom2);
+	void surface_set_custom3(const Color &p_custom3);
 	void surface_add_vertex(const Vector3 &p_vertex);
 	void surface_add_vertex_2d(const Vector2 &p_vertex);
 	void surface_end();
