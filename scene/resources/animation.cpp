@@ -1734,7 +1734,11 @@ int Animation::track_insert_key(int p_track, double p_time, const Variant &p_key
 			BezierTrack *bt = static_cast<BezierTrack *>(t);
 
 			Array arr = p_key;
+#ifdef TOOLS_ENABLED
+			ERR_FAIL_COND_V(arr.size() != 6, -1);
+#else
 			ERR_FAIL_COND_V(arr.size() != 5, -1);
+#endif // TOOLS_ENABLED
 
 			TKey<BezierKey> k;
 			k.time = p_time;
@@ -1743,6 +1747,10 @@ int Animation::track_insert_key(int p_track, double p_time, const Variant &p_key
 			k.value.in_handle.y = arr[2];
 			k.value.out_handle.x = arr[3];
 			k.value.out_handle.y = arr[4];
+#ifdef TOOLS_ENABLED
+			int handle = arr[5];
+			k.value.handle_mode = static_cast<HandleMode>(handle);
+#endif // TOOLS_ENABLED
 			ret = _insert(p_time, bt->values, k);
 
 			Vector<int> key_neighborhood;
@@ -1891,12 +1899,18 @@ Variant Animation::track_get_key_value(int p_track, int p_key_idx) const {
 			ERR_FAIL_INDEX_V(p_key_idx, bt->values.size(), Variant());
 
 			Array arr;
+#ifdef TOOLS_ENABLED
+			arr.resize(6);
+			arr[5] = bt->values[p_key_idx].value.handle_mode;
+#else
 			arr.resize(5);
+#endif // TOOLS_ENABLED
 			arr[0] = bt->values[p_key_idx].value.value;
 			arr[1] = bt->values[p_key_idx].value.in_handle.x;
 			arr[2] = bt->values[p_key_idx].value.in_handle.y;
 			arr[3] = bt->values[p_key_idx].value.out_handle.x;
 			arr[4] = bt->values[p_key_idx].value.out_handle.y;
+
 			return arr;
 
 		} break;
@@ -3188,7 +3202,12 @@ StringName Animation::method_track_get_name(int p_track, int p_key_idx) const {
 Array Animation::make_default_bezier_key(float p_value) {
 	const double max_width = length / 2.0;
 	Array new_point;
+#ifdef TOOLS_ENABLED
+	new_point.resize(6);
+	new_point[5] = HANDLE_MODE_FREE;
+#else
 	new_point.resize(5);
+#endif // TOOLS_ENABLED
 
 	new_point[0] = p_value;
 	new_point[1] = MAX(-0.25, -max_width);
