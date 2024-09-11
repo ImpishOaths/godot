@@ -36,6 +36,7 @@
 #include "thirdparty/zlib/zlib.h"
 
 #include "d3d12_godot_nir_bridge.h"
+#include "dxil_hash.h"
 #include "rendering_context_driver_d3d12.h"
 
 // No point in fighting warnings in Mesa.
@@ -59,7 +60,6 @@
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #endif
 
-#include "dxil_validator.h"
 #include "nir_spirv.h"
 #include "nir_to_dxil.h"
 #include "spirv_to_dxil.h"
@@ -2143,33 +2143,59 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 	for (uint32_t i = 0; i < p_texture_barriers.size(); i++) {
 		const TextureBarrier &texture_barrier_rd = p_texture_barriers[i];
 		const TextureInfo *texture_info = (const TextureInfo *)(texture_barrier_rd.texture.id);
+		if (texture_info->main_texture) {
+			texture_info = texture_info->main_texture;
+		}
 		_rd_stages_and_access_to_d3d12(p_src_stages, texture_barrier_rd.prev_layout, texture_barrier_rd.src_access, texture_barrier_d3d12.SyncBefore, texture_barrier_d3d12.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, texture_barrier_rd.next_layout, texture_barrier_rd.dst_access, texture_barrier_d3d12.SyncAfter, texture_barrier_d3d12.AccessAfter);
 		texture_barrier_d3d12.LayoutBefore = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.prev_layout);
 		texture_barrier_d3d12.LayoutAfter = _rd_texture_layout_to_d3d12_barrier_layout(texture_barrier_rd.next_layout);
 		texture_barrier_d3d12.pResource = texture_info->resource;
-		texture_barrier_d3d12.Subresources.IndexOrFirstMipLevel = texture_barrier_rd.subresources.base_mipmap;
-		texture_barrier_d3d12.Subresources.NumMipLevels = texture_barrier_rd.subresources.mipmap_count;
-		texture_barrier_d3d12.Subresources.FirstArraySlice = texture_barrier_rd.subresources.base_layer;
-		texture_barrier_d3d12.Subresources.NumArraySlices = texture_barrier_rd.subresources.layer_count;
-		texture_barrier_d3d12.Subresources.FirstPlane = _compute_plane_slice(texture_info->format, texture_barrier_rd.subresources.aspect);
-		texture_barrier_d3d12.Subresources.NumPlanes = format_get_plane_count(texture_info->format);
+		if (texture_barrier_rd.subresources.mipmap_count == texture_info->mipmaps && texture_barrier_rd.subresources.layer_count == texture_info->layers) {
+			// So, all resources. Then, let's be explicit about it so D3D12 doesn't think
+			// we are dealing with a subset of subresources.
+			texture_barrier_d3d12.Subresources.IndexOrFirstMipLevel = 0xffffffff;
+			texture_barrier_d3d12.Subresources.NumMipLevels = 0;
+			// Because NumMipLevels == 0, all the other fields are ignored by D3D12.
+		} else {
+			texture_barrier_d3d12.Subresources.IndexOrFirstMipLevel = texture_barrier_rd.subresources.base_mipmap;
+			texture_barrier_d3d12.Subresources.NumMipLevels = texture_barrier_rd.subresources.mipmap_count;
+			texture_barrier_d3d12.Subresources.FirstArraySlice = texture_barrier_rd.subresources.base_layer;
+			texture_barrier_d3d12.Subresources.NumArraySlices = texture_barrier_rd.subresources.layer_count;
+			texture_barrier_d3d12.Subresources.FirstPlane = _compute_plane_slice(texture_info->format, texture_barrier_rd.subresources.aspect);
+			texture_barrier_d3d12.Subresources.NumPlanes = format_get_plane_count(texture_info->format);
+		}
 		texture_barrier_d3d12.Flags = (texture_barrier_rd.prev_layout == RDD::TEXTURE_LAYOUT_UNDEFINED) ? D3D12_TEXTURE_BARRIER_FLAG_DISCARD : D3D12_TEXTURE_BARRIER_FLAG_NONE;
 		texture_barriers.push_back(texture_barrier_d3d12);
 	}
 
 	// Define the barrier groups and execute.
+
 	D3D12_BARRIER_GROUP barrier_groups[3] = {};
-	barrier_groups[0].Type = D3D12_BARRIER_TYPE_GLOBAL;
-	barrier_groups[1].Type = D3D12_BARRIER_TYPE_BUFFER;
-	barrier_groups[2].Type = D3D12_BARRIER_TYPE_TEXTURE;
-	barrier_groups[0].NumBarriers = global_barriers.size();
-	barrier_groups[1].NumBarriers = buffer_barriers.size();
-	barrier_groups[2].NumBarriers = texture_barriers.size();
-	barrier_groups[0].pGlobalBarriers = global_barriers.ptr();
-	barrier_groups[1].pBufferBarriers = buffer_barriers.ptr();
-	barrier_groups[2].pTextureBarriers = texture_barriers.ptr();
-	cmd_list_7->Barrier(ARRAY_SIZE(barrier_groups), barrier_groups);
+	uint32_t barrier_groups_count = 0;
+
+	if (!global_barriers.is_empty()) {
+		D3D12_BARRIER_GROUP &barrier_group = barrier_groups[barrier_groups_count++];
+		barrier_group.Type = D3D12_BARRIER_TYPE_GLOBAL;
+		barrier_group.NumBarriers = global_barriers.size();
+		barrier_group.pGlobalBarriers = global_barriers.ptr();
+	}
+
+	if (!buffer_barriers.is_empty()) {
+		D3D12_BARRIER_GROUP &barrier_group = barrier_groups[barrier_groups_count++];
+		barrier_group.Type = D3D12_BARRIER_TYPE_BUFFER;
+		barrier_group.NumBarriers = buffer_barriers.size();
+		barrier_group.pBufferBarriers = buffer_barriers.ptr();
+	}
+
+	if (!texture_barriers.is_empty()) {
+		D3D12_BARRIER_GROUP &barrier_group = barrier_groups[barrier_groups_count++];
+		barrier_group.Type = D3D12_BARRIER_TYPE_TEXTURE;
+		barrier_group.NumBarriers = texture_barriers.size();
+		barrier_group.pTextureBarriers = texture_barriers.ptr();
+	}
+
+	cmd_list_7->Barrier(barrier_groups_count, barrier_groups);
 }
 
 /****************/
@@ -2867,23 +2893,6 @@ static uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDevice::SHADER_STAGE_M
 	/* SHADER_STAGE_COMPUTE */ 2,
 };
 
-dxil_validator *RenderingDeviceDriverD3D12::_get_dxil_validator_for_current_thread() {
-	MutexLock lock(dxil_mutex);
-
-	int thread_idx = WorkerThreadPool::get_singleton()->get_thread_index();
-	if (dxil_validators.has(thread_idx)) {
-		return dxil_validators[thread_idx];
-	}
-
-#ifdef DEV_ENABLED
-	print_verbose("Creating DXIL validator for worker thread index " + itos(thread_idx));
-#endif
-
-	dxil_validator *dxil_validator = dxil_create_validator(nullptr);
-	dxil_validators.insert(thread_idx, dxil_validator);
-	return dxil_validator;
-}
-
 uint32_t RenderingDeviceDriverD3D12::_shader_patch_dxil_specialization_constant(
 		PipelineSpecializationConstantType p_type,
 		const void *p_value,
@@ -3006,40 +3015,20 @@ bool RenderingDeviceDriverD3D12::_shader_apply_specialization_constants(
 		ShaderStage stage = E.key;
 		if ((stages_re_sign_mask & (1 << stage))) {
 			Vector<uint8_t> &bytecode = E.value;
-			bool sign_ok = _shader_sign_dxil_bytecode(stage, bytecode);
-			ERR_FAIL_COND_V(!sign_ok, false);
+			_shader_sign_dxil_bytecode(stage, bytecode);
 		}
 	}
 
 	return true;
 }
 
-bool RenderingDeviceDriverD3D12::_shader_sign_dxil_bytecode(ShaderStage p_stage, Vector<uint8_t> &r_dxil_blob) {
-	dxil_validator *validator = _get_dxil_validator_for_current_thread();
-	if (!validator) {
-		if (is_in_developer_mode()) {
-			return true;
-		} else {
-			OS::get_singleton()->alert("Shader validation failed: DXIL.dll was not found, and developer mode is disabled.\n\nClick OK to exit.");
-			CRASH_NOW();
-		}
-	}
-
-	char *err = nullptr;
-	bool res = dxil_validate_module(validator, r_dxil_blob.ptrw(), r_dxil_blob.size(), &err);
-	if (!res) {
-		if (err) {
-			ERR_FAIL_COND_V_MSG(!res, false, "Shader signing invocation at stage " + String(SHADER_STAGE_NAMES[p_stage]) + " failed:\n" + String(err));
-		} else {
-			ERR_FAIL_COND_V_MSG(!res, false, "Shader signing invocation at stage " + String(SHADER_STAGE_NAMES[p_stage]) + " failed.");
-		}
-	}
-
-	return true;
+void RenderingDeviceDriverD3D12::_shader_sign_dxil_bytecode(ShaderStage p_stage, Vector<uint8_t> &r_dxil_blob) {
+	uint8_t *w = r_dxil_blob.ptrw();
+	compute_dxil_hash(w + 20, r_dxil_blob.size() - 20, w + 4);
 }
 
 String RenderingDeviceDriverD3D12::shader_get_binary_cache_key() {
-	return "D3D12-SV" + uitos(ShaderBinary::VERSION) + "-" + itos(shader_capabilities.shader_model) + (is_in_developer_mode() ? "dev" : "");
+	return "D3D12-SV" + uitos(ShaderBinary::VERSION) + "-" + itos(shader_capabilities.shader_model);
 }
 
 Vector<uint8_t> RenderingDeviceDriverD3D12::shader_compile_binary_from_spirv(VectorView<ShaderStageSPIRVData> p_spirv, const String &p_shader_name) {
@@ -3307,10 +3296,7 @@ Vector<uint8_t> RenderingDeviceDriverD3D12::shader_compile_binary_from_spirv(Vec
 			nir_to_dxil_options nir_to_dxil_options = {};
 			nir_to_dxil_options.environment = DXIL_ENVIRONMENT_VULKAN;
 			nir_to_dxil_options.shader_model_max = shader_model_d3d_to_dxil(shader_capabilities.shader_model);
-			dxil_validator *validator = _get_dxil_validator_for_current_thread();
-			if (validator) {
-				nir_to_dxil_options.validator_version_max = dxil_get_validator_version(validator);
-			}
+			nir_to_dxil_options.validator_version_max = NO_DXIL_VALIDATION;
 			nir_to_dxil_options.godot_nir_callbacks = &godot_nir_callbacks;
 
 			dxil_logger logger = {};
@@ -3361,8 +3347,7 @@ Vector<uint8_t> RenderingDeviceDriverD3D12::shader_compile_binary_from_spirv(Vec
 	for (KeyValue<ShaderStage, Vector<uint8_t>> &E : dxil_blobs) {
 		ShaderStage stage = E.key;
 		Vector<uint8_t> &dxil_blob = E.value;
-		bool sign_ok = _shader_sign_dxil_bytecode(stage, dxil_blob);
-		ERR_FAIL_COND_V(!sign_ok, Vector<uint8_t>());
+		_shader_sign_dxil_bytecode(stage, dxil_blob);
 	}
 
 	// Build the root signature.
@@ -3828,6 +3813,11 @@ uint32_t RenderingDeviceDriverD3D12::shader_get_layout_hash(ShaderID p_shader) {
 void RenderingDeviceDriverD3D12::shader_free(ShaderID p_shader) {
 	ShaderInfo *shader_info_in = (ShaderInfo *)p_shader.id;
 	VersatileResource::free(resources_allocator, shader_info_in);
+}
+
+void RenderingDeviceDriverD3D12::shader_destroy_modules(ShaderID p_shader) {
+	ShaderInfo *shader_info_in = (ShaderInfo *)p_shader.id;
+	shader_info_in->stages_bytecode.clear();
 }
 
 /*********************/
@@ -5098,6 +5088,7 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			if (pass_info->attachments[i].load_op == ATTACHMENT_LOAD_OP_CLEAR) {
 				clear.aspect.set_flag(TEXTURE_ASPECT_COLOR_BIT);
 				clear.color_attachment = i;
+				tex_info->pending_clear.remove_from_list();
 			}
 		} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
 			if (pass_info->attachments[i].stencil_load_op == ATTACHMENT_LOAD_OP_CLEAR) {
@@ -5376,10 +5367,12 @@ void RenderingDeviceDriverD3D12::command_bind_render_pipeline(CommandBufferID p_
 	cmd_buf_info->cmd_list->OMSetBlendFactor(pso_extra_info.dyn_params.blend_constant.components);
 	cmd_buf_info->cmd_list->OMSetStencilRef(pso_extra_info.dyn_params.stencil_reference);
 
-	ComPtr<ID3D12GraphicsCommandList1> command_list_1;
-	cmd_buf_info->cmd_list->QueryInterface(command_list_1.GetAddressOf());
-	if (command_list_1) {
-		command_list_1->OMSetDepthBounds(pso_extra_info.dyn_params.depth_bounds_min, pso_extra_info.dyn_params.depth_bounds_max);
+	if (misc_features_support.depth_bounds_supported) {
+		ComPtr<ID3D12GraphicsCommandList1> command_list_1;
+		cmd_buf_info->cmd_list->QueryInterface(command_list_1.GetAddressOf());
+		if (command_list_1) {
+			command_list_1->OMSetDepthBounds(pso_extra_info.dyn_params.depth_bounds_min, pso_extra_info.dyn_params.depth_bounds_max);
+		}
 	}
 
 	cmd_buf_info->render_pass_state.vf_info = pso_extra_info.vf_info;
@@ -5769,8 +5762,15 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 		(&pipeline_desc.DepthStencilState)->BackFace.StencilDepthFailOp = RD_TO_D3D12_STENCIL_OP[p_depth_stencil_state.back_op.depth_fail];
 		(&pipeline_desc.DepthStencilState)->BackFace.StencilFunc = RD_TO_D3D12_COMPARE_OP[p_depth_stencil_state.back_op.compare];
 
-		pso_extra_info.dyn_params.depth_bounds_min = p_depth_stencil_state.enable_depth_range ? p_depth_stencil_state.depth_range_min : 0.0f;
-		pso_extra_info.dyn_params.depth_bounds_max = p_depth_stencil_state.enable_depth_range ? p_depth_stencil_state.depth_range_max : 1.0f;
+		if (misc_features_support.depth_bounds_supported) {
+			pso_extra_info.dyn_params.depth_bounds_min = p_depth_stencil_state.enable_depth_range ? p_depth_stencil_state.depth_range_min : 0.0f;
+			pso_extra_info.dyn_params.depth_bounds_max = p_depth_stencil_state.enable_depth_range ? p_depth_stencil_state.depth_range_max : 1.0f;
+		} else {
+			if (p_depth_stencil_state.enable_depth_range) {
+				WARN_PRINT_ONCE("Depth bounds test is not supported by the GPU driver.");
+			}
+		}
+
 		pso_extra_info.dyn_params.stencil_reference = p_depth_stencil_state.front_op.reference;
 	}
 
@@ -6041,6 +6041,10 @@ void RenderingDeviceDriverD3D12::command_end_label(CommandBufferID p_cmd_buffer)
 #endif
 }
 
+void RenderingDeviceDriverD3D12::command_insert_breadcrumb(CommandBufferID p_cmd_buffer, uint32_t p_data) {
+	// TODO: Implement via DRED.
+}
+
 /********************/
 /**** SUBMISSION ****/
 /********************/
@@ -6287,15 +6291,6 @@ RenderingDeviceDriverD3D12::RenderingDeviceDriverD3D12(RenderingContextDriverD3D
 }
 
 RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
-	{
-		MutexLock lock(dxil_mutex);
-		for (const KeyValue<int, dxil_validator *> &E : dxil_validators) {
-			if (E.value) {
-				dxil_destroy_validator(E.value);
-			}
-		}
-	}
-
 	glsl_type_singleton_decref();
 }
 
@@ -6491,6 +6486,12 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		subgroup_capabilities.wave_ops_supported = options1.WaveOps;
 	}
 
+	D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS2, &options2, sizeof(options2));
+	if (SUCCEEDED(res)) {
+		misc_features_support.depth_bounds_supported = options2.DepthBoundsTestSupported;
+	}
+
 	D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3, sizeof(options3));
 	if (SUCCEEDED(res)) {
@@ -6575,6 +6576,12 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 
 	print_verbose(String("- D3D12 16-bit ops supported: ") + (shader_capabilities.native_16bit_ops ? "yes" : "no"));
+
+	if (misc_features_support.depth_bounds_supported) {
+		print_verbose("- Depth bounds test supported");
+	} else {
+		print_verbose("- Depth bounds test not supported");
+	}
 
 	return OK;
 }

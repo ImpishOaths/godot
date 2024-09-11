@@ -54,6 +54,18 @@ void ColorPicker::_notification(int p_what) {
 			_update_color();
 		} break;
 
+		case NOTIFICATION_READY: {
+			// FIXME: The embedding check is needed to fix a bug in single-window mode (GH-93718).
+			if (DisplayServer::get_singleton()->has_feature(DisplayServer::FEATURE_SCREEN_CAPTURE) && !get_tree()->get_root()->is_embedding_subwindows()) {
+				btn_pick->set_tooltip_text(ETR("Pick a color from the screen."));
+				btn_pick->connect(SceneStringName(pressed), callable_mp(this, &ColorPicker::_pick_button_pressed));
+			} else {
+				// On unsupported platforms, use a legacy method for color picking.
+				btn_pick->set_tooltip_text(ETR("Pick a color from the application window."));
+				btn_pick->connect(SceneStringName(pressed), callable_mp(this, &ColorPicker::_pick_button_pressed_legacy));
+			}
+		} break;
+
 		case NOTIFICATION_TRANSLATION_CHANGED: {
 			List<BaseButton *> buttons;
 			preset_group->get_buttons(&buttons);
@@ -771,7 +783,7 @@ void ColorPicker::_add_recent_preset_button(int p_size, const Color &p_color) {
 	recent_preset_hbc->add_child(btn_preset_new);
 	recent_preset_hbc->move_child(btn_preset_new, 0);
 	btn_preset_new->set_pressed(true);
-	btn_preset_new->connect("toggled", callable_mp(this, &ColorPicker::_recent_preset_pressed).bind(btn_preset_new));
+	btn_preset_new->connect(SceneStringName(toggled), callable_mp(this, &ColorPicker::_recent_preset_pressed).bind(btn_preset_new));
 }
 
 void ColorPicker::_show_hide_preset(const bool &p_is_btn_pressed, Button *p_btn_preset, Container *p_preset_container) {
@@ -1834,14 +1846,6 @@ ColorPicker::ColorPicker() {
 
 	btn_pick = memnew(Button);
 	sample_hbc->add_child(btn_pick);
-	if (DisplayServer::get_singleton()->has_feature(DisplayServer::FEATURE_SCREEN_CAPTURE)) {
-		btn_pick->set_tooltip_text(ETR("Pick a color from the screen."));
-		btn_pick->connect(SceneStringName(pressed), callable_mp(this, &ColorPicker::_pick_button_pressed));
-	} else {
-		// On unsupported platforms, use a legacy method for color picking.
-		btn_pick->set_tooltip_text(ETR("Pick a color from the application window."));
-		btn_pick->connect(SceneStringName(pressed), callable_mp(this, &ColorPicker::_pick_button_pressed_legacy));
-	}
 
 	sample = memnew(TextureRect);
 	sample_hbc->add_child(sample);
@@ -1999,7 +2003,7 @@ ColorPicker::ColorPicker() {
 	btn_preset->set_toggle_mode(true);
 	btn_preset->set_focus_mode(FOCUS_NONE);
 	btn_preset->set_text_alignment(HORIZONTAL_ALIGNMENT_LEFT);
-	btn_preset->connect("toggled", callable_mp(this, &ColorPicker::_show_hide_preset).bind(btn_preset, preset_container));
+	btn_preset->connect(SceneStringName(toggled), callable_mp(this, &ColorPicker::_show_hide_preset).bind(btn_preset, preset_container));
 	real_vbox->add_child(btn_preset);
 
 	real_vbox->add_child(preset_container);
@@ -2016,7 +2020,7 @@ ColorPicker::ColorPicker() {
 	btn_recent_preset->set_toggle_mode(true);
 	btn_recent_preset->set_focus_mode(FOCUS_NONE);
 	btn_recent_preset->set_text_alignment(HORIZONTAL_ALIGNMENT_LEFT);
-	btn_recent_preset->connect("toggled", callable_mp(this, &ColorPicker::_show_hide_preset).bind(btn_recent_preset, recent_preset_hbc));
+	btn_recent_preset->connect(SceneStringName(toggled), callable_mp(this, &ColorPicker::_show_hide_preset).bind(btn_recent_preset, recent_preset_hbc));
 	real_vbox->add_child(btn_recent_preset);
 
 	real_vbox->add_child(recent_preset_hbc);

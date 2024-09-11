@@ -455,11 +455,15 @@ Size2i DisplayServerAndroid::window_get_size_with_decorations(DisplayServer::Win
 }
 
 void DisplayServerAndroid::window_set_mode(DisplayServer::WindowMode p_mode, DisplayServer::WindowID p_window) {
-	// Not supported on Android.
+	OS_Android::get_singleton()->get_godot_java()->enable_immersive_mode(p_mode == WINDOW_MODE_FULLSCREEN || p_mode == WINDOW_MODE_EXCLUSIVE_FULLSCREEN);
 }
 
 DisplayServer::WindowMode DisplayServerAndroid::window_get_mode(DisplayServer::WindowID p_window) const {
-	return WINDOW_MODE_FULLSCREEN;
+	if (OS_Android::get_singleton()->get_godot_java()->is_in_immersive_mode()) {
+		return WINDOW_MODE_FULLSCREEN;
+	} else {
+		return WINDOW_MODE_MAXIMIZED;
+	}
 }
 
 bool DisplayServerAndroid::window_is_maximize_allowed(DisplayServer::WindowID p_window) const {
@@ -651,7 +655,6 @@ DisplayServerAndroid::DisplayServerAndroid(const String &p_rendering_driver, Dis
 #endif
 
 	Input::get_singleton()->set_event_dispatch_function(_dispatch_input_events);
-	Input::get_singleton()->set_use_input_buffering(true); // Needed because events will come directly from the UI thread
 
 	r_error = OK;
 }

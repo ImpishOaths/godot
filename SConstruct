@@ -200,7 +200,10 @@ opts.Add(EnumVariable("arch", "CPU architecture", "auto", ["auto"] + architectur
 opts.Add(BoolVariable("dev_build", "Developer build with dev-only debugging code (DEV_ENABLED)", False))
 opts.Add(
     EnumVariable(
-        "optimize", "Optimization level", "speed_trace", ("none", "custom", "debug", "speed", "speed_trace", "size")
+        "optimize",
+        "Optimization level (by default inferred from 'target' and 'dev_build')",
+        "auto",
+        ("auto", "none", "custom", "debug", "speed", "speed_trace", "size"),
     )
 )
 opts.Add(BoolVariable("debug_symbols", "Build with debugging symbols", False))
@@ -215,10 +218,11 @@ opts.Add(BoolVariable("deprecated", "Enable compatibility code for deprecated an
 opts.Add(EnumVariable("precision", "Set the floating-point precision level", "single", ("single", "double")))
 opts.Add(BoolVariable("minizip", "Enable ZIP archive support using minizip", True))
 opts.Add(BoolVariable("brotli", "Enable Brotli for decompresson and WOFF2 fonts support", True))
-opts.Add(BoolVariable("xaudio2", "Enable the XAudio2 audio driver", False))
+opts.Add(BoolVariable("xaudio2", "Enable the XAudio2 audio driver on supported platforms", False))
 opts.Add(BoolVariable("vulkan", "Enable the vulkan rendering driver", True))
 opts.Add(BoolVariable("opengl3", "Enable the OpenGL/GLES3 rendering driver", True))
-opts.Add(BoolVariable("d3d12", "Enable the Direct3D 12 rendering driver", False))
+opts.Add(BoolVariable("d3d12", "Enable the Direct3D 12 rendering driver on supported platforms", False))
+opts.Add(BoolVariable("metal", "Enable the Metal rendering driver on supported platforms (Apple arm64 only)", False))
 opts.Add(BoolVariable("openxr", "Enable the OpenXR driver", True))
 opts.Add(BoolVariable("use_volk", "Use the volk library to load the Vulkan loader dynamically", True))
 opts.Add(BoolVariable("disable_exceptions", "Force disabling exception handling code", True))
@@ -230,7 +234,14 @@ opts.Add(BoolVariable("dev_mode", "Alias for dev options: verbose=yes warnings=e
 opts.Add(BoolVariable("tests", "Build the unit tests", False))
 opts.Add(BoolVariable("fast_unsafe", "Enable unsafe options for faster rebuilds", False))
 opts.Add(BoolVariable("ninja", "Use the ninja backend for faster rebuilds", False))
+opts.Add(BoolVariable("ninja_auto_run", "Run ninja automatically after generating the ninja file", True))
+opts.Add("ninja_file", "Path to the generated ninja file", "build.ninja")
 opts.Add(BoolVariable("compiledb", "Generate compilation DB (`compile_commands.json`) for external tools", False))
+opts.Add(
+    "num_jobs",
+    "Use up to N jobs when compiling (equivalent to `-j N`). Defaults to max jobs - 1. Ignored if -j is used.",
+    "",
+)
 opts.Add(BoolVariable("verbose", "Enable verbose output for the compilation", False))
 opts.Add(BoolVariable("progress", "Show a progress indicator during compilation", True))
 opts.Add(EnumVariable("warnings", "Level of compilation warnings", "all", ("extra", "all", "moderate", "no")))
@@ -466,14 +477,15 @@ env.editor_build = env["target"] == "editor"
 env.dev_build = env["dev_build"]
 env.debug_features = env["target"] in ["editor", "template_debug"]
 
-if env.dev_build:
-    opt_level = "none"
-elif env.debug_features:
-    opt_level = "speed_trace"
-else:  # Release
-    opt_level = "speed"
+if env["optimize"] == "auto":
+    if env.dev_build:
+        opt_level = "none"
+    elif env.debug_features:
+        opt_level = "speed_trace"
+    else:  # Release
+        opt_level = "speed"
+    env["optimize"] = ARGUMENTS.get("optimize", opt_level)
 
-env["optimize"] = ARGUMENTS.get("optimize", opt_level)
 env["debug_symbols"] = methods.get_cmdline_bool("debug_symbols", env.dev_build)
 
 if env.editor_build:
@@ -533,16 +545,22 @@ initial_num_jobs = env.GetOption("num_jobs")
 altered_num_jobs = initial_num_jobs + 1
 env.SetOption("num_jobs", altered_num_jobs)
 if env.GetOption("num_jobs") == altered_num_jobs:
-    cpu_count = os.cpu_count()
-    if cpu_count is None:
-        print_warning("Couldn't auto-detect CPU count to configure build parallelism. Specify it with the -j argument.")
+    num_jobs = env.get("num_jobs", "")
+    if str(num_jobs).isdigit() and int(num_jobs) > 0:
+        env.SetOption("num_jobs", num_jobs)
     else:
-        safer_cpu_count = cpu_count if cpu_count <= 4 else cpu_count - 1
-        print(
-            "Auto-detected %d CPU cores available for build parallelism. Using %d cores by default. You can override it with the -j argument."
-            % (cpu_count, safer_cpu_count)
-        )
-        env.SetOption("num_jobs", safer_cpu_count)
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            print_warning(
+                "Couldn't auto-detect CPU count to configure build parallelism. Specify it with the `-j` or `num_jobs` arguments."
+            )
+        else:
+            safer_cpu_count = cpu_count if cpu_count <= 4 else cpu_count - 1
+            print(
+                "Auto-detected %d CPU cores available for build parallelism. Using %d cores by default. You can override it with the `-j` or `num_jobs` arguments."
+                % (cpu_count, safer_cpu_count)
+            )
+            env.SetOption("num_jobs", safer_cpu_count)
 
 env.extra_suffix = ""
 
@@ -696,12 +714,11 @@ if env.msvc:
     else:
         env.Append(LINKFLAGS=["/DEBUG:NONE"])
 
-    if env["optimize"] == "speed":
+    if env["optimize"].startswith("speed"):
         env.Append(CCFLAGS=["/O2"])
         env.Append(LINKFLAGS=["/OPT:REF"])
-    elif env["optimize"] == "speed_trace":
-        env.Append(CCFLAGS=["/O2"])
-        env.Append(LINKFLAGS=["/OPT:REF", "/OPT:NOICF"])
+        if env["optimize"] == "speed_trace":
+            env.Append(LINKFLAGS=["/OPT:NOICF"])
     elif env["optimize"] == "size":
         env.Append(CCFLAGS=["/O1"])
         env.Append(LINKFLAGS=["/OPT:REF"])
@@ -712,7 +729,13 @@ else:
         # Adding dwarf-4 explicitly makes stacktraces work with clang builds,
         # otherwise addr2line doesn't understand them
         env.Append(CCFLAGS=["-gdwarf-4"])
-        if env.dev_build:
+        if methods.using_emcc(env):
+            # Emscripten only produces dwarf symbols when using "-g3".
+            env.Append(CCFLAGS=["-g3"])
+            # Emscripten linker needs debug symbols options too.
+            env.Append(LINKFLAGS=["-gdwarf-4"])
+            env.Append(LINKFLAGS=["-g3"])
+        elif env.dev_build:
             env.Append(CCFLAGS=["-g3"])
         else:
             env.Append(CCFLAGS=["-g2"])
@@ -727,17 +750,25 @@ else:
         else:
             env.Append(LINKFLAGS=["-s"])
 
+    # Linker needs optimization flags too, at least for Emscripten.
+    # For other toolchains, this _may_ be useful for LTO too to disambiguate.
+
     if env["optimize"] == "speed":
         env.Append(CCFLAGS=["-O3"])
+        env.Append(LINKFLAGS=["-O3"])
     # `-O2` is friendlier to debuggers than `-O3`, leading to better crash backtraces.
     elif env["optimize"] == "speed_trace":
         env.Append(CCFLAGS=["-O2"])
+        env.Append(LINKFLAGS=["-O2"])
     elif env["optimize"] == "size":
         env.Append(CCFLAGS=["-Os"])
+        env.Append(LINKFLAGS=["-Os"])
     elif env["optimize"] == "debug":
         env.Append(CCFLAGS=["-Og"])
+        env.Append(LINKFLAGS=["-Og"])
     elif env["optimize"] == "none":
         env.Append(CCFLAGS=["-O0"])
+        env.Append(LINKFLAGS=["-O0"])
 
 # Needs to happen after configure to handle "auto".
 if env["lto"] != "none":
@@ -756,6 +787,12 @@ else:
     # MSVC doesn't have clear C standard support, /std only covers C++.
     # We apply it to CCFLAGS (both C and C++ code) in case it impacts C features.
     env.Prepend(CCFLAGS=["/std:c++17"])
+    # MSVC is non-conforming with the C++ standard by default, so we enable more conformance.
+    # Note that this is still not complete conformance, as certain Windows-related headers
+    # don't compile under complete conformance.
+    env.Prepend(CCFLAGS=["/permissive-"])
+    # Allow use of `__cplusplus` macro to determine C++ standard universally.
+    env.Prepend(CXXFLAGS=["/Zc:__cplusplus"])
 
 # Disable exception handling. Godot doesn't use exceptions anywhere, and this
 # saves around 20% of binary size and very significant build time (GH-80513).
@@ -768,7 +805,7 @@ elif env.msvc:
     env.Append(CXXFLAGS=["/EHsc"])
 
 # Configure compiler warnings
-if env.msvc:  # MSVC
+if env.msvc and not methods.using_clang(env):  # MSVC
     if env["warnings"] == "no":
         env.Append(CCFLAGS=["/w"])
     else:
@@ -818,8 +855,11 @@ else:  # GCC, Clang
         # for putting them in `Set` or `Map`. We don't mind about unreliable ordering.
         common_warnings += ["-Wno-ordered-compare-function-pointers"]
 
+    # clang-cl will interpret `-Wall` as `-Weverything`, workaround with compatibility cast
+    W_ALL = "-Wall" if not env.msvc else "-W3"
+
     if env["warnings"] == "extra":
-        env.Append(CCFLAGS=["-Wall", "-Wextra", "-Wwrite-strings", "-Wno-unused-parameter"] + common_warnings)
+        env.Append(CCFLAGS=[W_ALL, "-Wextra", "-Wwrite-strings", "-Wno-unused-parameter"] + common_warnings)
         env.Append(CXXFLAGS=["-Wctor-dtor-privacy", "-Wnon-virtual-dtor"])
         if methods.using_gcc(env):
             env.Append(
@@ -841,9 +881,9 @@ else:  # GCC, Clang
         elif methods.using_clang(env) or methods.using_emcc(env):
             env.Append(CCFLAGS=["-Wimplicit-fallthrough"])
     elif env["warnings"] == "all":
-        env.Append(CCFLAGS=["-Wall"] + common_warnings)
+        env.Append(CCFLAGS=[W_ALL] + common_warnings)
     elif env["warnings"] == "moderate":
-        env.Append(CCFLAGS=["-Wall", "-Wno-unused"] + common_warnings)
+        env.Append(CCFLAGS=[W_ALL, "-Wno-unused"] + common_warnings)
     else:  # 'no'
         env.Append(CCFLAGS=["-w"])
 
@@ -994,11 +1034,14 @@ if env["vsproj"]:
     env.vs_incs = []
     env.vs_srcs = []
 
-if env["compiledb"] and env.scons_version < (4, 0, 0):
-    # Generating the compilation DB (`compile_commands.json`) requires SCons 4.0.0 or later.
-    print_error("The `compiledb=yes` option requires SCons 4.0 or later, but your version is %s." % scons_raw_version)
-    Exit(255)
-if env.scons_version >= (4, 0, 0):
+if env["compiledb"]:
+    if env.scons_version < (4, 0, 0):
+        # Generating the compilation DB (`compile_commands.json`) requires SCons 4.0.0 or later.
+        print_error(
+            "The `compiledb=yes` option requires SCons 4.0 or later, but your version is %s." % scons_raw_version
+        )
+        Exit(255)
+
     env.Tool("compilation_db")
     env.Alias("compiledb", env.CompilationDatabase())
 
@@ -1008,13 +1051,9 @@ if env["ninja"]:
         Exit(255)
 
     SetOption("experimental", "ninja")
-
-    # By setting this we allow the user to run ninja by themselves with all
-    # the flags they need, as apparently automatically running from scons
-    # is way slower.
-    SetOption("disable_execute_ninja", True)
-
-    env.Tool("ninja")
+    env["NINJA_FILE_NAME"] = env["ninja_file"]
+    env["NINJA_DISABLE_AUTO_RUN"] = not env["ninja_auto_run"]
+    env.Tool("ninja", "build.ninja")
 
 # Threads
 if env["threads"]:
@@ -1040,9 +1079,9 @@ SConscript("platform/" + env["platform"] + "/SCsub")  # Build selected platform.
 
 # Microsoft Visual Studio Project Generation
 if env["vsproj"]:
+    methods.generate_cpp_hint_file("cpp.hint")
     env["CPPPATH"] = [Dir(path) for path in env["CPPPATH"]]
     methods.generate_vs_project(env, ARGUMENTS, env["vsproj_name"])
-    methods.generate_cpp_hint_file("cpp.hint")
 
 # Check for the existence of headers
 conf = Configure(env)
@@ -1077,7 +1116,7 @@ atexit.register(print_elapsed_time)
 
 
 def purge_flaky_files():
-    paths_to_keep = ["ninja.build"]
+    paths_to_keep = ["build.ninja"]
     for build_failure in GetBuildFailures():
         path = build_failure.node.path
         if os.path.isfile(path) and path not in paths_to_keep:

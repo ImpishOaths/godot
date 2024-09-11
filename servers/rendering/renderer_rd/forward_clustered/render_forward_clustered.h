@@ -73,6 +73,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 		SPEC_CONSTANT_DECAL_FILTER = 10,
 		SPEC_CONSTANT_PROJECTOR_FILTER = 11,
 		SPEC_CONSTANT_USE_DEPTH_FOG = 12,
+		SPEC_CONSTANT_USE_LIGHTMAP_BICUBIC_FILTER = 13,
 	};
 
 	enum {
@@ -235,8 +236,9 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 
 	struct LightmapData {
 		float normal_xform[12];
-		float pad[3];
+		float texture_size[2];
 		float exposure_normalization;
+		float pad;
 	};
 
 	struct LightmapCaptureData {
@@ -361,7 +363,7 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 
 	static RenderForwardClustered *singleton;
 
-	void _setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, bool p_flip_y, const Color &p_default_bg_color, bool p_opaque_render_buffers = false, bool p_apply_alpha_multiplier = false, bool p_pancake_shadows = false, int p_index = 0);
+	void _setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_opaque_render_buffers = false, bool p_apply_alpha_multiplier = false, bool p_pancake_shadows = false, int p_index = 0);
 	void _setup_voxelgis(const PagedArray<RID> &p_voxelgis);
 	void _setup_lightmaps(const RenderDataRD *p_render_data, const PagedArray<RID> &p_lightmaps, const Transform3D &p_cam_transform);
 
